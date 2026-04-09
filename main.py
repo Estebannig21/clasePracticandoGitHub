@@ -1,28 +1,50 @@
-from fastapi import FastAPI
+# main.py — versión nueva
+from pydantic import BaseModel
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from dotenv import load_dotenv
+from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationship
 from typing import Annotated
-
-from fastapi import Depends, HTTPException, Query
-from sqlmodel import Field, Session, SQLModel, create_engine, select
-
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 import os
 
-load_dotenv()
+load_dotenv()  # ← mover al inicio
 
-class User(SQLModel, table=True):
+# ── Modelos ──────────────────────────────────────────────
+class Conversation(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(index=True)
-    age: int | None = Field(default=None, index=True)
-    username: str
+    title: str = Field(default="Nueva conversación")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    messages: list["Message"] = Relationship(back_populates="conversation")
 
-# sqlite_file_name = "db.sqlite"
-sqlite_url = os.getenv("DATABASE_URL")
+class Message(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    conversation_id: int = Field(foreign_key="conversation.id")
+    role: str  # "user" o "model"
+    content: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    conversation: Conversation | None = Relationship(back_populates="messages")
 
-connect_args = {"check_same_thread": False}
-engine = create_engine(sqlite_url)
+# ── Schemas de respuesta (separar tabla de lo que devolvemos) ──
+class MessageOut(SQLModel):
+    id: int
+    role: str
+    content: str
+    created_at: datetime
+
+class ConversationOut(SQLModel):
+    id: int
+    title: str
+    created_at: datetime
+
+class ChatRequest(BaseModel):
+    message: str
+
+# ── Base de datos ─────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL")
+engine = create_engine(DATABASE_URL)
 
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
@@ -31,79 +53,97 @@ def get_session():
     with Session(engine) as session:
         yield session
 
-
 SessionDep = Annotated[Session, Depends(get_session)]
 
+# ── App ───────────────────────────────────────────────────
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
 
-@app.post("/users/") # ENDPOINT TIPO POST que me crea un user
-def create_user(user: User, session: SessionDep) -> User: # Definir una función
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
-
-# Leer multiples y hacer paginación
-@app.get("/users/")
-def read_users(
-    session: SessionDep,
-    offset: int = 0,
-    limit: Annotated[int, Query(le=100)] = 100,
-) -> list[User]:
-    users = session.exec(select(User).offset(offset).limit(limit)).all()
-    return users
-
-# Leer un único
-@app.get("/users/{user_id}")
-def read_user(user_id: int, session: SessionDep) -> User:
-    user = session.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
-@app.delete("/users/{user_id}")
-def delete_user(user_id: int, session: SessionDep):
-    user = session.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    session.delete(user)
-    session.commit()
-    return {"ok": True}
-
-# Enable CORS for development (adjust origins for production)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Serve static files from ./static at /static
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-
-
 @app.get("/")
-async def homepage():
+def root():
     return FileResponse("static/index.html")
 
 
-@app.get("/llm/{prompt}")
-async def read_root(prompt):
-    # CREAR UNA LOGICA QUE ME PERMITA COMUNICARME CON UN LLM
+# ── Endpoints de Conversaciones ───────────────────────────────
+@app.post("/conversations/", response_model=ConversationOut)
+def create_conversation(session: SessionDep):
+    conv = Conversation()
+    session.add(conv)
+    session.commit()
+    session.refresh(conv)
+    return conv
+
+@app.get("/conversations/", response_model=list[ConversationOut])
+def list_conversations(session: SessionDep):
+    return session.exec(select(Conversation)).all()
+
+@app.get("/conversations/{conv_id}/messages", response_model=list[MessageOut])
+def get_messages(conv_id: int, session: SessionDep):
+    conv = session.get(Conversation, conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+    return session.exec(
+        select(Message).where(Message.conversation_id == conv_id)
+    ).all()
+
+
+@app.post("/conversations/{conv_id}/chat", response_model=MessageOut)
+def chat(conv_id: int, body: ChatRequest, session: SessionDep):
     from google import genai
 
-    # The client gets the API key from the environment variable `GEMINI_API_KEY`.
+    # 1. Verificar que existe la conversación
+    conv = session.get(Conversation, conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversación no encontrada")
+
+    # 2. Guardar mensaje del usuario
+    user_msg = Message(
+        conversation_id=conv_id,
+        role="user",
+        content=body.message
+    )
+    session.add(user_msg)
+    session.commit()
+
+    # 3. Cargar historial para enviar contexto a Gemini
+    history = session.exec(
+        select(Message)
+        .where(Message.conversation_id == conv_id)
+        .order_by(Message.created_at)
+    ).all()
+
+    # 4. Llamar a Gemini con todo el historial
     client = genai.Client()
+    gemini_history = [
+        {"role": msg.role, "parts": [{"text": msg.content}]}
+        for msg in history[:-1]  # todo excepto el último (recién guardado)
+    ]
 
     response = client.models.generate_content(
-        model="gemini-3-flash-preview", contents=prompt
+        model="gemini-2.0-flash",
+        contents=gemini_history + [{"role": "user", "parts": [{"text": body.message}]}]
     )
-    print(response.text)
 
-    return {"Respuesta": response.text}
+    # 5. Guardar respuesta del modelo
+    bot_msg = Message(
+        conversation_id=conv_id,
+        role="model",
+        content=response.text
+    )
+    session.add(bot_msg)
+    session.commit()
+    session.refresh(bot_msg)
+
+    return bot_msg

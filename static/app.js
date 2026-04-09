@@ -1,31 +1,38 @@
 document.addEventListener('DOMContentLoaded', function () {
-  const promptInput = document.getElementById('prompt');
-  const sendBtn = document.getElementById('send');
-  const chatEl = document.getElementById('chat');
-  const clearBtn = document.getElementById('clear');
+  const promptInput  = document.getElementById('prompt');
+  const sendBtn      = document.getElementById('send');
+  const chatEl       = document.getElementById('chat');
+  const newConvBtn   = document.getElementById('new-conv-btn');
+  const convListEl   = document.getElementById('conv-list');
+  const emptyState   = document.getElementById('empty-state');
 
-  const STORAGE_KEY = 'llm_chat_history';
-  let messages = [];
+  let currentConvId  = null;
 
-  function renderMessage(role, text, time, id) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'message ' + (role === 'user' ? 'user' : 'bot');
-    if (id) wrapper.dataset.id = id;
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    // Render Markdown to HTML and sanitize. Fallback to textContent if libraries missing.
+  // ── Helpers de render ──────────────────────────────────────
+
+  function mdToHtml(text) {
     try {
       if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-        bubble.innerHTML = DOMPurify.sanitize(marked.parse(String(text)));
-      } else {
-        bubble.textContent = text;
+        return DOMPurify.sanitize(marked.parse(String(text)));
       }
-    } catch (e) {
-      bubble.textContent = text;
-    }
+    } catch (_) {}
+    return String(text).replace(/</g, '&lt;');
+  }
+
+  function renderMessage(role, content, createdAt) {
+    if (emptyState) emptyState.remove();
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message ' + role; // "user" o "model"
+
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.innerHTML = mdToHtml(content);
+
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = time ? new Date(time).toLocaleString() : '';
+    meta.textContent = createdAt ? new Date(createdAt).toLocaleString() : '';
+
     wrapper.appendChild(bubble);
     wrapper.appendChild(meta);
     chatEl.appendChild(wrapper);
@@ -33,116 +40,115 @@ document.addEventListener('DOMContentLoaded', function () {
     return wrapper;
   }
 
-  function saveMessages() {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
-    } catch (e) {
-      console.warn('No se pudo guardar el historial', e);
+  function renderTyping() {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message model';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = 'Escribiendo…';
+    wrapper.appendChild(bubble);
+    chatEl.appendChild(wrapper);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return wrapper;
+  }
+
+  // ── Conversaciones ─────────────────────────────────────────
+
+  async function loadConversations() {
+    const res = await fetch('/conversations/');
+    if (!res.ok) return;
+    const convs = await res.json();
+    convListEl.innerHTML = '';
+    convs.forEach(renderConvItem);
+  }
+
+  function renderConvItem(conv) {
+    const item = document.createElement('div');
+    item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
+    item.dataset.id = conv.id;
+    item.textContent = conv.title || `Conversación #${conv.id}`;
+    item.addEventListener('click', () => selectConversation(conv.id));
+    convListEl.appendChild(item);
+  }
+
+  async function selectConversation(convId) {
+    currentConvId = convId;
+
+    // Marcar activo en sidebar
+    document.querySelectorAll('.conv-item').forEach(el => {
+      el.classList.toggle('active', Number(el.dataset.id) === convId);
+    });
+
+    // Habilitar composer
+    promptInput.disabled = false;
+    sendBtn.disabled = false;
+    promptInput.focus();
+
+    // Cargar mensajes
+    chatEl.innerHTML = '';
+    const res = await fetch(`/conversations/${convId}/messages`);
+    if (!res.ok) return;
+    const messages = await res.json();
+    if (messages.length === 0) {
+      const ph = document.createElement('div');
+      ph.id = 'empty-state';
+      ph.textContent = 'Aún no hay mensajes. ¡Escribí algo!';
+      chatEl.appendChild(ph);
+    } else {
+      messages.forEach(m => renderMessage(m.role, m.content, m.created_at));
     }
   }
 
-  function loadMessages() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      messages = JSON.parse(raw) || [];
-      messages.forEach(m => renderMessage(m.role, m.text, m.time, m.id));
-    } catch (e) {
-      console.warn('No se pudo leer el historial', e);
-      messages = [];
-    }
-  }
+  newConvBtn.addEventListener('click', async () => {
+    const res = await fetch('/conversations/', { method: 'POST' });
+    if (!res.ok) return;
+    const conv = await res.json();
+    renderConvItem(conv);
+    selectConversation(conv.id);
+  });
 
-  async function sendPrompt() {
-    const prompt = promptInput.value.trim();
-    if (!prompt) return;
+  // ── Envío de mensajes ──────────────────────────────────────
+
+  async function sendMessage() {
+    const text = promptInput.value.trim();
+    if (!text || !currentConvId) return;
     promptInput.value = '';
+    sendBtn.disabled = true;
 
-    // Mostrar mensaje del usuario
-    const time = Date.now();
-    const userId = 'm-' + time + '-u';
-    messages.push({ role: 'user', text: prompt, time, id: userId });
-    saveMessages();
-    renderMessage('user', prompt, time, userId);
-
-    // Mostrar indicador de typing para el bot
-    const typingId = 'typing-' + Date.now();
-    const typingTime = Date.now();
-    // push a placeholder bot message; will be replaced when response arrives
-    messages.push({ role: 'bot', text: 'Escribiendo...', time: typingTime, id: typingId });
-    saveMessages();
-    const typingEl = renderMessage('bot', 'Escribiendo...', typingTime, typingId);
+    renderMessage('user', text, new Date().toISOString());
+    const typingEl = renderTyping();
 
     try {
-      const res = await fetch('/llm/' + encodeURIComponent(prompt));
+      const res = await fetch(`/conversations/${currentConvId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+
+      typingEl.remove();
+
       if (!res.ok) {
-        const txt = await res.text();
-        const errMsg = `Error ${res.status}: ${txt}`;
-        if (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined') {
-          typingEl.querySelector('.bubble').innerHTML = DOMPurify.sanitize(marked.parse(errMsg));
-        } else {
-          typingEl.querySelector('.bubble').textContent = errMsg;
-        }
+        const err = await res.text();
+        renderMessage('model', `Error ${res.status}: ${err}`, new Date().toISOString());
         return;
       }
-      const data = await res.json();
-      const text = data.Respuesta || JSON.stringify(data, null, 2);
-      // update messages array (replace last placeholder with actual)
-      const idx = messages.findIndex(m => m.id === typingId);
-      if (idx !== -1) messages[idx] = { role: 'bot', text, time: Date.now(), id: typingId };
-      saveMessages();
-      if (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined') {
-        typingEl.querySelector('.bubble').innerHTML = DOMPurify.sanitize(marked.parse(String(text)));
-      } else {
-        typingEl.querySelector('.bubble').textContent = text;
-      }
-      typingEl.querySelector('.meta').textContent = new Date().toLocaleString();
+
+      const msg = await res.json();
+      renderMessage(msg.role, msg.content, msg.created_at);
     } catch (err) {
-      const errText = 'Error de red: ' + err.message;
-      const idx = messages.findIndex(m => m.id === typingId);
-      if (idx !== -1) messages[idx] = { role: 'bot', text: errText, time: Date.now(), id: typingId };
-      saveMessages();
-      if (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined') {
-        typingEl.querySelector('.bubble').innerHTML = DOMPurify.sanitize(marked.parse(errText));
-      } else {
-        typingEl.querySelector('.bubble').textContent = errText;
-      }
-      typingEl.querySelector('.meta').textContent = new Date().toLocaleString();
+      typingEl.remove();
+      renderMessage('model', `Error de red: ${err.message}`, new Date().toISOString());
+    } finally {
+      sendBtn.disabled = false;
+      promptInput.focus();
     }
   }
 
-  sendBtn.addEventListener('click', sendPrompt);
-  promptInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') sendPrompt();
+  sendBtn.addEventListener('click', sendMessage);
+  promptInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) sendMessage();
   });
 
-  clearBtn.addEventListener('click', function () {
-    if (!confirm('¿Limpiar historial de chat?')) return;
-    messages = [];
-    saveMessages();
-    chatEl.innerHTML = '';
-  });
-
-  // Load previous messages
-  loadMessages();
-
-  // Small styles injected to keep file standalone-ish
-  const style = document.createElement('style');
-  style.textContent = `
-    .chat{height:60vh; overflow:auto; border:1px solid #e1e4e8; padding:1rem; border-radius:8px; background:#fff}
-    .message{display:flex; flex-direction:column; margin-bottom:.6rem}
-    .message.user{align-items:flex-end}
-    .message.bot{align-items:flex-start}
-    .bubble{max-width:75%; padding:.6rem .8rem; border-radius:12px; background:#f1f3f5}
-    .message.user .bubble{background:#0b93f6; color:white}
-    .meta{font-size:.7rem; color:#666; margin-top:.25rem}
-    pre{background:#0b1220;color:#e6edf3;padding:8px;border-radius:6px;overflow:auto}
-    code{background:#f6f8fa;padding:2px 4px;border-radius:4px}
-    blockquote{border-left:4px solid #ddd;padding-left:8px;color:#555;margin:0}
-    .composer{margin-top:1rem; display:flex; gap:.5rem}
-    .composer input{flex:1; padding:.6rem; font-size:1rem}
-    .composer button{padding:.6rem 1rem}
-  `;
-  document.head.appendChild(style);
+  // ── Init ──────────────────────────────────────────────────
+  loadConversations();
 });
-
