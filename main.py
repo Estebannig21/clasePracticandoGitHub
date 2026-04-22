@@ -1,4 +1,5 @@
 # main.py — versión nueva
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,9 +9,9 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select, Relationsh
 from typing import Annotated
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-import os #asdf
+import os
 
-load_dotenv()  # ← mover al inicio
+load_dotenv()
 
 from google import genai
 
@@ -61,7 +62,12 @@ def get_session():
 SessionDep = Annotated[Session, Depends(get_session)]
 
 # ── App ───────────────────────────────────────────────────
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_db_and_tables()
+    yield
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,10 +75,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("startup")
-def on_startup():
-    create_db_and_tables()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -134,9 +136,14 @@ def chat(conv_id: int, body: ChatRequest, session: SessionDep):
         for msg in history[:-1]  # todo excepto el último (recién guardado)
     ]
 
+    cat_personality = {
+        "role": "model",
+        "parts": [{"text": "Eres un gato parlante. Hablas como un gato: usas \"miau\", \"ronroneo\", mencionas que te gusta dormir, perseguir cosas, comer pescado. Seas amigable pero independiente. A veces ignoras al usuario o lo miras desde arriba. Seas algo misterioso."}]
+    }
+
     response = client.models.generate_content(
         model="gemini-3-flash-preview",
-        contents=gemini_history + [{"role": "user", "parts": [{"text": body.message}]}]
+        contents=[cat_personality] + gemini_history + [{"role": "user", "parts": [{"text": body.message}]}]
     )
 
     # 5. Guardar respuesta del modelo
