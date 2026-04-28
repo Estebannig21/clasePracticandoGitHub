@@ -4,6 +4,7 @@ from sqlmodel import SQLModel, create_engine, Session
 from sqlmodel.pool import StaticPool
 from main import app, get_session
 
+
 @pytest.fixture(name="session")
 def session_fixture():
     engine = create_engine(
@@ -15,6 +16,7 @@ def session_fixture():
     with Session(engine) as session:
         yield session
 
+
 @pytest.fixture(name="client")
 def client_fixture(session: Session):
     def get_session_override():
@@ -24,3 +26,9 @@ def client_fixture(session: Session):
     client = TestClient(app)
     yield client
     app.dependency_overrides.clear()
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "e2e: end-to-end tests that require a running server"
+    )
