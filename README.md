@@ -33,7 +33,7 @@ docker run --name chat-db \
   -p 5432:5432 \
   -d postgres:16
 ```
-
+#AQUI ESTA EL CAMBIO
 Luego agregá también en tu `.env`:
 
 ```
