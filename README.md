@@ -3,7 +3,7 @@
 Repositorio de clases prácticas sobre desarrollo de software con LLMs.
 
 ## Clases
-
+..
 1. **FastAPI como backend** — endpoints REST, integración con LLM, frontend con HTML, CSS y JavaScript
 2. **Docker para Postgres y PgAdmin** — contenerización de la base de datos, configuración de PgAdmin
 3. **Intro a Testing** — primeros pasos con testing en Python, pytest, estructura de tests
