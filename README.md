@@ -9,6 +9,8 @@ Repositorio de clases prácticas sobre desarrollo de software con LLMs.
 3. **Intro a Testing** — primeros pasos con testing en Python, pytest, estructura de tests
 4. **E2E Testing** — pruebas end-to-end con Playwright, automatización del navegador
 
+
+Hola
 ---
 
 ## Requisitos para correr el proyecto
